@@ -1,0 +1,273 @@
+import streamlit as st
+import pdfplumber
+import pandas as pd
+import re
+import io
+import os
+import openpyxl
+from copy import copy
+
+from openpyxl.cell.text import InlineFont
+from openpyxl.cell.rich_text import TextBlock, CellRichText
+from openpyxl.styles.colors import Color
+from openpyxl.styles import Font, Border, Side
+
+# --- THE DEFAULT TEMPLATE PATH ---
+TEMPLATE_PATH = "POTemplate.xlsx"
+
+# --- DEFINING THE BORDER FOR AUTO-FILLED DATA ---
+thin_border = Border(
+    left=Side(style='thin', color='A5A5A5'), 
+    right=Side(style='thin', color='A5A5A5'), 
+    top=Side(style='thin', color='A5A5A5'), 
+    bottom=Side(style='thin', color='A5A5A5')
+)
+
+# --- FACTORY NAME FORMATTER ---
+def format_factory_name(name):
+    """Dynamically inserts spaces into squished factory names."""
+    if not name:
+        return name
+    name = str(name)
+    # Add a space between a letter and an opening parenthesis
+    name = re.sub(r'([a-zA-Z])\(', r'\1 (', name)
+    # Add a space between a closing parenthesis and a letter
+    name = re.sub(r'\)([a-zA-Z])', r') \1', name)
+    # Split TraxApparel if it got squished
+    name = re.sub(r'(Trax)(Apparel)', r'\1 \2', name, flags=re.IGNORECASE)
+    return name.strip()
+
+# --- RICH TEXT FORMATTER FOR COLUMN AK ---
+def format_ak_column(text_val):
+    """Applies precise Calibri 11px Blue/Red Rich Text to the filling column."""
+    if not text_val:
+        return text_val
+    
+    text_str = str(text_val)
+
+    # Explicit Excel Color Objects (FF = 100% Solid)
+    # FF0070C0 = Standard Excel Blue | FFFF0000 = Pure Excel Red
+    blue_color = Color(rgb="FF0070C0")
+    red_color = Color(rgb="FFFF0000")
+
+    blue_font = InlineFont(rFont="Calibri", sz=11, color=blue_color)
+    red_font = InlineFont(rFont="Calibri", sz=11, color=red_color)
+
+    # 1. Handle the mixed Red/Blue cases (< 75%)
+    if "between 50% to 74.9%" in text_str or "between 0% to 49.9%" in text_str:
+        # Splits the text while keeping the Goose/Duck words for red coloring
+        parts = re.split(r'(Goose down|Duck down)', text_str)
+        rich_text_elements = []
+        
+        for part in parts:
+            if not part: continue
+            if part in ["Goose down", "Duck down"]:
+                rich_text_elements.append(TextBlock(red_font, part))
+            else:
+                rich_text_elements.append(TextBlock(blue_font, part))
+                
+        return CellRichText(*rich_text_elements)
+
+    # 2. Handle the standard all-blue cases (>= 75% and 80%)
+    if "Filling:" in text_str:
+        return CellRichText(TextBlock(blue_font, text_str))
+
+    return text_str
+
+# --- 1. THE EXTRACTION LOGIC ---
+def parse_purchase_order(file_object):
+    po_details = {
+        "PO Number": "Not Found", "Date": "Not Found", "Header Ref Code": "Not Found",
+        "Item ID": "Not Found", "Remark Size": "Not Found", "Order": "Others", 
+        "Style Name": "Not Found", "Age Group": "Not Found", "Gender": "Not Found", 
+        "Garment Type": "Not Found", "Product Group": "Apparel", 
+        "Factory Line": "Trax Apparel (Cambodia) Co.,Ltd.", "Product Division": "APP", 
+        "Leather Logo": "No", "COO": "MADE IN CAMBODIA", "Season": "Not Found"
+    }
+    items_data = []
+
+    try:
+        with pdfplumber.open(file_object) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += page.extract_text() + "\n"
+
+            # Dynamic PO Scanner
+            po_match = re.search(r"K[A-Z]{2,5}\d{6,}", full_text)
+            if po_match: 
+                po_details["PO Number"] = po_match.group(0)
+            else:
+                po_details["PO Number"] = file_object.name.replace(".pdf", "").replace(".PDF", "")
+
+            item_match = re.search(r"(\d{8}-[A-Z]+-[A-Z0-9]+)", full_text)
+            if item_match:
+                clean_code = item_match.group(1).split("-")[-1] 
+                po_details["Item ID"] = clean_code
+                po_details["Header Ref Code"] = clean_code
+
+            # Dynamic SIZE PAGE Scanner (J4, 62, 60, etc.)
+            size_match = re.search(r"SIZE\s*PAGE\s*([^\n]+)", full_text, re.IGNORECASE)
+            if size_match: 
+                po_details["Remark Size"] = size_match.group(1).strip()
+
+            # Enhanced regex to prevent blank Style Names or slashes in Product Group
+            garment_patterns = {
+                "Order": r"Order[\s:;]*(.*?)(?=;|Style|Product|Age|Gender|Garment|Factory|COO)",
+                "Style Name": r"Style\s*Name[\s:;]*(.*?)(?=;|Age|Gender|Garment|Product|COO)",
+                "Age Group": r"Age\s*Group[\s:;]*(.*?)(?=;|Gender|Garment|Product|COO)",
+                "Gender": r"Gender[\s:;]*(.*?)(?=;|Garment|Product|COO)",
+                "Garment Type": r"Garment\s*Type[\s:;]*(.*?)(?=;|Product|Factory|COO)",
+                "Product Group": r"Product\s*Group[/\w\s]*[\s:;]*(.*?)(?=;|Factory|product)",
+                "Factory Line": r"Factory\s*Line\s*name[\s:;]*(.*?)(?=;|product|Made|COO)",
+                "Product Division": r"product\s*division[\s:;]*(.*?)(?=;|Made|COO)",
+                "Leather Logo": r"Made\s*by\s*leather[\s:;]*(.*?)(?=;|COO)",
+                "COO": r"COO[\s:;]*(.*?)(?=;|\n|001A)",
+                "Season": r"Season[\s:;]*([A-Z0-9]+)"
+            }
+
+            for key, pattern in garment_patterns.items():
+                match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    clean_val = match.group(1).replace('\n', ' ').strip()
+                    clean_val = clean_val.rstrip(';/').strip()
+                    # Strip the word "Order" if it's part of the value
+                    if key == "Order":
+                        clean_val = clean_val.replace("Order", "").strip()
+                    po_details[key] = clean_val
+
+            lines = full_text.split('\n')
+            for line in lines:
+                if "PCS" in line:
+                    p = line.split()
+                    if "PCS" in p:
+                        if len(p) > 2 and (p[1] == "NO" or p[2] == "NO"): continue
+                        pcs_idx = p.index("PCS")
+                        try:
+                            items_data.append({
+                                "PO Number": po_details["PO Number"], 
+                                "Material": p[0], "Color": p[1], "Size": p[2], "Sub-Code": p[3],
+                                "Qty": float(p[pcs_idx - 1]), "Unit": "PCS",
+                                "Price": float(p[pcs_idx + 1]), "Amount": float(p[-2]), "Delivery": p[-1]
+                            })
+                        except (ValueError, IndexError): continue
+                            
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
+        return None, None
+    return po_details, pd.DataFrame(items_data)
+
+# --- 2. THE EXACT-STYLE TEMPLATE POPULATOR ---
+def populate_existing_template(template_path, df_details, df_items):
+    if df_items.empty or df_details.empty: return None
+    workbook = openpyxl.load_workbook(template_path)
+    sheet = workbook.active
+    
+    # Locate header row dynamically
+    header_row = 19 
+    for r in range(1, 50): 
+        if "*PO# number" in str(sheet.cell(row=r, column=1).value):
+            header_row = r
+            break
+    start_row = header_row + 1 
+
+    # Restore template headers coloring
+    for r in range(1, start_row + 1):
+        ak_cell = sheet.cell(row=r, column=37)
+        if ak_cell.value:
+            ak_cell.value = format_ak_column(ak_cell.value)
+            ak_cell.font = Font(name="Calibri", size=11)
+
+    df_merged = pd.merge(df_items, df_details, on="PO Number", how="left")
+    
+    for index, row in df_merged.iterrows():
+        current_row = start_row + index
+        
+        # Clean formatting for specific columns
+        age_group_val = str(row["Age Group"]).capitalize() if pd.notna(row["Age Group"]) and str(row["Age Group"]).upper() != "NOT FOUND" else ""
+        
+        # Market Cleaner: Title Case "Korea", "Japan", etc.
+        raw_market = str(row["Order"]).strip().upper()
+        known_markets = ["KOREA", "JAPAN", "CHINA", "INDONESIA", "MALAYSIA", "THAILAND", "VIETNAM", "USA", "OTHERS"]
+        market_found = "Others"
+        for m in known_markets:
+            if m in raw_market:
+                market_found = m.title()
+                break
+        
+        mapping = {
+            1: row["PO Number"], 2: row["Item ID"], 3: row["Sub-Code"], 4: row["Product Group"],
+            5: row["Style Name"], 6: "MADE IN CAMBODIA", 7: "Adidas", 
+            8: format_factory_name(row["Factory Line"]), 10: row["Leather Logo"], 11: age_group_val, 
+            12: row["Remark Size"], 13: row["Garment Type"], 14: row["Gender"], 15: row["Product Division"],
+            19: row["Size"], 22: row["Qty"], 23: market_found, 24: "BULK", 25: row["Season"]
+        }
+
+        for col_num in range(1, 45):
+            target_cell = sheet.cell(row=current_row, column=col_num)
+            
+            # Clone template styles for each row
+            if current_row != start_row: 
+                template_cell = sheet.cell(row=start_row, column=col_num)
+                if template_cell.has_style:
+                    target_cell.fill = copy(template_cell.fill)
+                    target_cell.number_format = copy(template_cell.number_format)
+                    target_cell.protection = copy(template_cell.protection)
+                    target_cell.alignment = copy(template_cell.alignment)
+                    target_cell.font = copy(template_cell.font)
+                if col_num not in mapping:
+                    target_cell.value = template_cell.value
+
+            # Insert mapped data
+            if col_num in mapping:
+                target_cell.value = mapping[col_num]
+            
+            # Force standard grid borders
+            target_cell.border = thin_border
+            
+            # Force ".00" format for Quantity
+            if col_num == 22: 
+                target_cell.number_format = '0.00'
+                
+            # Re-apply Blue/Red Rich Text to AK
+            if col_num == 37 and target_cell.value:
+                target_cell.value = format_ak_column(target_cell.value)
+                target_cell.font = Font(name="Calibri", size=11)
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+# --- 3. THE UI ---
+st.set_page_config(page_title="PO Data Extractor", layout="wide")
+st.title("📄 One-Click PO Template Auto-Filler")
+
+if not os.path.exists(TEMPLATE_PATH):
+    st.error(f"⚠️ **Error:** Could not find `{TEMPLATE_PATH}` in the current folder.")
+else:
+    st.info(f"✅ Template `{TEMPLATE_PATH}` detected.")
+    uploaded_pdfs = st.file_uploader("Upload PO PDF files", type=["pdf"], accept_multiple_files=True)
+    
+    if uploaded_pdfs:
+        all_po_details, all_items_data = [], []
+        with st.spinner('Reading Purchase Orders...'):
+            for file in uploaded_pdfs:
+                details, df_items = parse_purchase_order(file)
+                if details:
+                    all_po_details.append(details)
+                    if not df_items.empty: all_items_data.append(df_items)
+        
+        if all_po_details:
+            master_details_df = pd.DataFrame(all_po_details)
+            master_items_df = pd.concat(all_items_data, ignore_index=True) if all_items_data else pd.DataFrame()
+            
+            final_excel_file = populate_existing_template(TEMPLATE_PATH, master_details_df, master_items_df)
+            
+            if final_excel_file:
+                st.success("Template successfully populated!")
+                st.download_button(
+                    label="💾 Download Completed Order Form", 
+                    data=final_excel_file, 
+                    file_name="Completed_PO_Order_Form.xlsx", 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )

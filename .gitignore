@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.env
+
+# --- PyInstaller (Compiled Exe Files) ---
+build/
+dist/
+*.spec
+
+# --- Local Database ---
+# We ignore the DB so you don't accidentally push all your company's PO data to Git
+po_database.db
+*.sqlite3
+
+# --- Generated Reports ---
+# Ignore all downloaded Excel and CSV files...
+*.xlsx
+*.csv
+# ...BUT explicitly keep the required template!
+!POTemplate.xlsx
+
+# --- IDEs & OS Files ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
