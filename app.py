@@ -12,7 +12,7 @@ from datetime import datetime, date
 from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock, CellRichText
 from openpyxl.styles.colors import Color
-from openpyxl.styles import Font, Border, Side
+from openpyxl.styles import Font, Border, Side, PatternFill, Alignment
 
 # --- THE DEFAULT TEMPLATE PATH ---
 TEMPLATE_PATH = "POTemplate.xlsx"
@@ -23,6 +23,14 @@ thin_border = Border(
     right=Side(style='thin', color='A5A5A5'), 
     top=Side(style='thin', color='A5A5A5'), 
     bottom=Side(style='thin', color='A5A5A5')
+)
+
+# Darker border for the None Template headers
+thick_border = Border(
+    left=Side(style='thin', color='000000'), 
+    right=Side(style='thin', color='000000'), 
+    top=Side(style='thin', color='000000'), 
+    bottom=Side(style='thin', color='000000')
 )
 
 # --- FACTORY NAME FORMATTER ---
@@ -61,9 +69,10 @@ def format_ak_column(text_val):
 
 # --- 1. THE EXTRACTION LOGIC ---
 def parse_purchase_order(file_object):
+    # Notice: Item ID, Item Code, and Order are removed from global details
+    # because they are now uniquely tracked per line item!
     po_details = {
-        "PO Number": "Not Found", "Date": "Not Found", "Header Ref Code": "Not Found",
-        "Item ID": "Not Found", "Remark Size": "Not Found", "Order": "OTHERS", 
+        "PO Number": "Not Found", "Date": "Not Found", "Remark Size": "Not Found", 
         "Style Name": "Not Found", "Age Group": "Not Found", "Gender": "Not Found", 
         "Garment Type": "Not Found", "Product Group": "Apparel", 
         "Factory Line": "Trax Apparel (Cambodia) Co.,Ltd.", "Product Division": "APP", 
@@ -85,33 +94,11 @@ def parse_purchase_order(file_object):
             else:
                 po_details["PO Number"] = file_object.name.replace(".pdf", "").replace(".PDF", "")
 
-            item_match = re.search(r"(\d{8}-[A-Z]+-[A-Z0-9]+)", full_text)
-            if item_match:
-                clean_code = item_match.group(1).split("-")[-1] 
-                po_details["Item ID"] = clean_code
-                po_details["Header Ref Code"] = clean_code
-
             size_match = re.search(r"SIZE\s*PAGE\s*([^\n]+)", full_text, re.IGNORECASE)
             if size_match: 
                 po_details["Remark Size"] = size_match.group(1).strip()
 
-            # --- THE FINAL, BULLETPROOF MARKET EXTRACTION STRATEGY ---
-            # 1. Find EVERY time "Order" is followed by a word (ignoring punctuation/spaces)
-            market_matches = re.findall(r"Order[\s:;-]*([A-Za-z]+)", full_text, re.IGNORECASE)
-            
-            valid_market = "OTHERS"
-            if market_matches:
-                # 2. Filter out known bad grabs like "Order Quantity", "Order Form", or "Purchase Order" (where "Order" is the match)
-                for match in reversed(market_matches): # Search backwards, the real one is usually at the end
-                    clean_match = match.strip().upper()
-                    if clean_match not in ["QUANTITY", "FORM", "DATE", "NUMBER", "NO", "PCS"]:
-                        valid_market = clean_match
-                        break
-            
-            po_details["Order"] = valid_market
-
             garment_patterns = {
-                # "Order" is handled above now!
                 "Style Name": r"Style\s*Name[\s:;]*(.*?)(?=;|Age|Gender|Garment|Product|COO)",
                 "Age Group": r"Age\s*Group[\s:;]*(.*?)(?=;|Gender|Garment|Product|COO)",
                 "Gender": r"Gender[\s:;]*(.*?)(?=;|Garment|Product|COO)",
@@ -127,19 +114,70 @@ def parse_purchase_order(file_object):
             for key, pattern in garment_patterns.items():
                 match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
                 if match:
-                    # Clean up the extracted text safely
                     clean_val = match.group(1).replace('\n', ' ').strip()
-                    # Condense multiple accidental spaces down to a single space
                     clean_val = re.sub(r'\s+', ' ', clean_val)
                     clean_val = clean_val.rstrip(';/').strip()
-                    
-                    if key == "Order":
-                        # Scrub out any accidental grab of "Order" or "Market"
-                        clean_val = clean_val.replace("Order", "").replace("Market", "").strip()
                     po_details[key] = clean_val
 
+            # --- GLOBAL FALLBACKS (In case missing from line logic) ---
+            global_fallback_style = "Not Found"
+            cladd_style = re.search(r"CLADD Additional Care Label\s*\n\s*([A-Z0-9]+)", full_text, re.IGNORECASE)
+            if cladd_style:
+                global_fallback_style = cladd_style.group(1).strip()
+            else:
+                any_item_with_style = re.search(r"Item\s*[:;]?\s*\d{8}(?:-[A-Za-z0-9]+)*-([A-Z0-9]{4,})", full_text, re.IGNORECASE)
+                if any_item_with_style:
+                    global_fallback_style = any_item_with_style.group(1).strip()
+
+            global_fallback_market = "Other"
+            market_matches = re.findall(r"Order[\s:;-]*([A-Za-z]+)", full_text, re.IGNORECASE)
+            skip_words = ["QUANTITY", "FORM", "DATE", "NUMBER", "NO", "PCS", "TRANSFER", "FOR", "MARKET", "GROUP", "TYPE"]
+            
+            if market_matches:
+                for match in market_matches:
+                    clean_match = match.strip().upper()
+                    if clean_match not in skip_words:
+                        global_fallback_market = "Other" if clean_match in ["OTHER", "OTHERS"] else clean_match
+                        break
+
+            global_fallback_item_code = "Not Found"
+            any_item_code = re.search(r"Item\s*[:;]?\s*(\d{8})", full_text, re.IGNORECASE)
+            if any_item_code:
+                global_fallback_item_code = any_item_code.group(1).strip()
+
+            # --- MULTI-GROUP LINE-BY-LINE EXTRACTION ---
+            # This ensures each item group dynamically updates its own Market & Style!
+            current_market = global_fallback_market
+            current_item_id = global_fallback_style
+            current_item_code = global_fallback_item_code
+
             lines = full_text.split('\n')
-            for line in lines:
+            for i, line in enumerate(lines):
+                # 1. Look for explicit market markers in the line (e.g. "Order CHINA;")
+                market_match = re.search(r"Order[\s:;-]*([A-Za-z]+)", line, re.IGNORECASE)
+                if market_match:
+                    clean_match = market_match.group(1).strip().upper()
+                    if clean_match not in skip_words:
+                        current_market = "Other" if clean_match in ["OTHER", "OTHERS"] else clean_match
+
+                # 2. Look for explicit item strings containing styles/markets
+                item_match = re.search(r"Item\s*[:;]?\s*(\d{8}(?:-[A-Za-z0-9]+)*)", line, re.IGNORECASE)
+                if item_match:
+                    full_item_str = item_match.group(1)
+                    parts = full_item_str.split('-')
+                    current_item_code = parts[0]
+                    if len(parts) >= 3:
+                        mid_market = parts[1].strip().upper()
+                        if mid_market not in skip_words:
+                            current_market = "Other" if mid_market in ["OTHER", "OTHERS"] else mid_market
+                        current_item_id = "-".join(parts[2:]).strip()
+                    elif len(parts) == 2:
+                        if parts[1].upper() in ["OTHER", "OTHERS"]:
+                            current_market = "Other"
+                        else:
+                            current_item_id = parts[1].strip()
+
+                # 3. Process the actual row of Data
                 if "PCS" in line:
                     p = line.split()
                     if "PCS" in p:
@@ -148,6 +186,9 @@ def parse_purchase_order(file_object):
                         try:
                             items_data.append({
                                 "PO Number": po_details["PO Number"], 
+                                "Item Code": current_item_code,
+                                "Item ID": current_item_id,
+                                "Order": current_market,
                                 "Material": p[0], "Color": p[1], "Size": p[2], "Sub-Code": p[3],
                                 "Qty": float(p[pcs_idx - 1]), "Unit": "PCS",
                                 "Price": float(p[pcs_idx + 1]), "Amount": float(p[-2]), "Delivery": p[-1]
@@ -225,27 +266,199 @@ def populate_existing_template(template_path, df_merged):
     output.seek(0)
     return output
 
+# --- NONE TEMPLATE EXCEL GENERATOR ---
+def generate_styled_none_template(df):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Order Form"
+    
+    header_config = [
+        (1, 1, "PO"),
+        (2, 6, "customer ordered size"),
+        (7, 11, "Sourcing Size"),
+        (12, 16, "Tecn. Notation"),
+        (17, 20, "size run ID"),
+        (21, 24, "Chinese Customize Size - 2nd line size"),
+        (25, 28, "Quantity"),
+        (29, 33, "Age group"),
+        (34, 38, "Gender"),
+        (39, 43, "Size Spec / Pattern"),
+        (44, 47, "Size page"),
+        (48, 51, "Top/Bottom"),
+        (52, 54, "Product division"),
+        (55, 57, "Season"),
+        (58, 60, "Style"),
+        (61, 63, "Code item")
+    ]
+    
+    header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+    font_header_default = Font(bold=True, color="000000")
+    font_header_red = Font(bold=True, color="FF0000")
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    
+    for start_c, end_c, text in header_config:
+        sheet.merge_cells(start_row=1, start_column=start_c, end_row=1, end_column=end_c)
+        main_cell = sheet.cell(row=1, column=start_c)
+        main_cell.value = text
+        current_font = font_header_red if text == "Chinese Customize Size - 2nd line size" else font_header_default
+        for c in range(start_c, end_c + 1):
+            cell = sheet.cell(row=1, column=c)
+            cell.fill = header_fill
+            cell.font = current_font
+            cell.alignment = header_alignment
+            cell.border = thick_border
+                
+    green_data_font = Font(color="008608")
+    data_alignment = Alignment(horizontal='center', vertical='center')
+    
+    def clean_val(val):
+        if not val: return ""
+        v_str = str(val).strip()
+        if v_str.upper() in ["NOT FOUND", "NAN", "NONE"]:
+            return ""
+        return v_str
+    
+    for r_idx, row in enumerate(df.to_dict('records'), 2):
+        for start_c, end_c, text_h in header_config:
+            if start_c != end_c:
+                sheet.merge_cells(start_row=r_idx, start_column=start_c, end_row=r_idx, end_column=end_c)
+            target_cell = sheet.cell(row=r_idx, column=start_c)
+            if text_h == "PO":
+                target_cell.value = clean_val(row.get("PO Number", ""))
+            elif text_h == "customer ordered size":
+                full_size = str(row.get("Sourcing Size", ""))
+                size_parts = full_size.split('/')
+                target_cell.value = size_parts[1] if len(size_parts) > 1 else full_size
+            elif text_h == "Sourcing Size":
+                full_size = str(row.get("Sourcing Size", ""))
+                size_parts = full_size.split('/')
+                target_cell.value = size_parts[0] if len(size_parts) > 1 else full_size
+            elif text_h == "Tecn. Notation":
+                target_cell.value = "B3"
+            elif text_h == "size run ID":
+                target_cell.value = "2X"
+            elif text_h == "Chinese Customize Size - 2nd line size":
+                target_cell.value = "NO"
+            elif text_h == "Quantity":
+                target_cell.value = float(row.get("Order Quantity", 0))
+                target_cell.number_format = '0.00'
+            elif text_h == "Age group":
+                target_cell.value = clean_val(row.get("Age Group", ""))
+            elif text_h == "Gender":
+                target_cell.value = clean_val(row.get("Gender", ""))
+            elif text_h == "Size Spec / Pattern":
+                target_cell.value = "GLOBAL SIZE"
+            elif text_h == "Size page":
+                target_cell.value = clean_val(row.get("Size Page", ""))
+            elif text_h == "Top/Bottom":
+                target_cell.value = clean_val(row.get("Garment Type", "")).title()
+            elif text_h == "Product division":
+                target_cell.value = clean_val(row.get("Product Division", ""))
+            elif text_h == "Season":
+                target_cell.value = clean_val(row.get("Season", ""))
+            elif text_h == "Style":
+                style_val = clean_val(row.get("Style ID", ""))
+                if not style_val: style_val = clean_val(row.get("Style Name", ""))
+                target_cell.value = style_val
+            elif text_h == "Code item":
+                target_cell.value = clean_val(row.get("Item Code", ""))
+            for c in range(start_c, end_c + 1):
+                cell = sheet.cell(row=r_idx, column=c)
+                cell.font = green_data_font
+                cell.border = thin_border
+                cell.alignment = data_alignment
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
 # --- 3. THE UI & NAVIGATION ---
 st.set_page_config(page_title="PO Data Extractor", page_icon=":material/description:", layout="wide")
+
+# --- HIGH-VISIBILITY VUE-JS ROUTER CSS ---
+st.markdown("""
+    <style>
+    /* 1. Hides the radio circles entirely */
+    [data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {
+        display: none !important;
+    }
+    
+    /* 2. Base styling for the Route Buttons */
+    [data-testid="stSidebar"] div[role="radiogroup"] label {
+        padding: 14px 22px !important;
+        border-radius: 0px 30px 30px 0px !important; 
+        background-color: transparent !important;
+        border: none !important;
+        margin-bottom: 8px !important;
+        cursor: pointer !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        display: flex !important;
+        align-items: center !important;
+        width: 100% !important;
+        margin-left: -20px !important; /* Forces left indicator to the very edge */
+        border-left: 6px solid transparent !important;
+    }
+    
+    /* 3. Inactive text color and font size */
+    [data-testid="stSidebar"] div[role="radiogroup"] label div p {
+        color: #606266 !important;
+        font-size: 16px !important;
+        font-weight: 500 !important;
+    }
+    
+    /* 4. Hover State - Subtle light gray */
+    [data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background-color: #F5F7FA !important;
+        transform: translateX(4px) !important;
+    }
+    
+    /* 5. ACTIVE / SELECTED STATE (The "Standing On" highlight) */
+    /* Target the container of the checked radio */
+    [data-testid="stSidebar"] div[role="radiogroup"] [data-checked="true"] label {
+        background-color: #ECF5FF !important; /* Soft active blue background */
+        border-left: 6px solid #409EFF !important; /* THE VUE-JS PRIMARY BLUE INDICATOR */
+        padding-left: 22px !important;
+        box-shadow: 0 4px 10px rgba(64, 158, 255, 0.15) !important;
+    }
+    
+    /* 6. Force text inside ACTIVE label to Primary Blue and BOLD */
+    [data-testid="stSidebar"] div[role="radiogroup"] [data-checked="true"] label div p {
+        color: #409EFF !important;
+        font-weight: 700 !important;
+    }
+    
+    /* 7. Force Material Icons inside ACTIVE label to Primary Blue */
+    [data-testid="stSidebar"] div[role="radiogroup"] [data-checked="true"] label span {
+        color: #409EFF !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 if "preview_df" not in st.session_state:
     st.session_state.preview_df = None
 if "report_name_default" not in st.session_state:
     st.session_state.report_name_default = "Extracted_PO_Data"
+if "none_preview_df" not in st.session_state:
+    st.session_state.none_preview_df = None
+if "none_report_name_default" not in st.session_state:
+    st.session_state.none_report_name_default = "None_Template_PO_Data"
 
-st.sidebar.title(":material/dashboard: Control Panel")
+st.sidebar.title("App Navigation")
 menu = st.sidebar.radio("Navigate Systems:", [
     ":material/download: 1. Data Extraction", 
     ":material/settings: 2. Data Processing & Export", 
-    ":material/bar_chart: 3. Reports"
+    ":material/note_add: 3. None Template Data Extraction",
+    ":material/build: 4. None Template Data Process",
+    ":material/bar_chart: 5. Reports"
 ])
 
+# =====================================================================
+# 1. DATA EXTRACTION
+# =====================================================================
 if menu == ":material/download: 1. Data Extraction":
     st.title(":material/download: Data Extraction")
-    st.markdown("Upload your PO PDFs. The system will parse the documents and structure the data automatically.")
-
-    uploaded_pdfs = st.file_uploader("Upload PO PDFs for Extraction", type=["pdf"], accept_multiple_files=True)
-
+    st.markdown("Upload your PO PDFs for standard template processing.")
+    uploaded_pdfs = st.file_uploader("Upload PO PDFs", type=["pdf"], accept_multiple_files=True)
     if uploaded_pdfs:
         all_po_details, all_items_data = [], []
         with st.spinner('Analyzing Purchase Orders...'):
@@ -254,199 +467,139 @@ if menu == ":material/download: 1. Data Extraction":
                 if details:
                     all_po_details.append(details)
                     if not df_items.empty: all_items_data.append(df_items)
-        
         if all_po_details:
             master_details_df = pd.DataFrame(all_po_details)
             master_items_df = pd.concat(all_items_data, ignore_index=True) if all_items_data else pd.DataFrame()
-            
             preview_rows = []
-            df_merged_raw = pd.merge(master_items_df, master_details_df, on="PO Number", how="left")
             
+            # Use left merge to combine global file details with line-item specific tracking
+            df_merged_raw = pd.merge(master_items_df, master_details_df, on="PO Number", how="left")
             for _, row in df_merged_raw.iterrows():
                 age_group_val = str(row["Age Group"]).capitalize() if pd.notna(row["Age Group"]) and str(row["Age Group"]).upper() != "NOT FOUND" else ""
                 
-                # Dynamic Market Check Cleanup
+                # Use the clean market data directly from the updated scanner
                 raw_market = str(row["Order"]).strip()
-                if not raw_market or raw_market.upper() in ["NOT FOUND", "OTHERS", "", "ORDER"]:
-                    market_found = "OTHERS"
-                else:
-                    # Clean up the capitalization to be uppercase
-                    market_found = raw_market.upper()
+                market_found = "Other" if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"] else raw_market
+                if market_found.upper() in ["OTHER", "OTHERS"]:
+                    market_found = "Other"
                 
                 preview_rows.append({
-                    "*PO# number": row["PO Number"],
-                    "*Style#": row["Item ID"],
-                    "*Article#": row["Sub-Code"],
-                    "*Product group / type ": row["Product Group"],
-                    "*Style name": row["Style Name"],
-                    "*COO": "MADE IN CAMBODIA",
-                    "*Brand": "Adidas",
-                    "*Factory line name ": format_factory_name(row["Factory Line"]),
-                    "Leather logo (optional)": row["Leather Logo"],
-                    "*Age group": age_group_val,
-                    "*Size page": row["Remark Size"],
-                    "*Garment type": row["Garment Type"],
-                    "*Gender": row["Gender"],
-                    "*Product division ": row["Product Division"],
-                    "*Sourcing size": row["Size"],
-                    "*Order Quantity": row["Qty"],
-                    "*Order Market ": market_found,
-                    "*Order Type": "BULK",
-                    "*Season": row["Season"]
+                    "*PO# number": row["PO Number"], "Item Code": row["Item Code"], "*Style#": row["Item ID"],
+                    "*Article#": row["Sub-Code"], "*Product group / type ": row["Product Group"], "*Style name": row["Style Name"],
+                    "*COO": "MADE IN CAMBODIA", "*Brand": "Adidas", "*Factory line name ": format_factory_name(row["Factory Line"]),
+                    "Leather logo (optional)": row["Leather Logo"], "*Age group": age_group_val, "*Size page": row["Remark Size"],
+                    "*Garment type": row["Garment Type"], "*Gender": row["Gender"], "*Product division ": row["Product Division"],
+                    "*Sourcing size": row["Size"], "*Order Quantity": row["Qty"], "*Order Market ": market_found,
+                    "*Order Type": "BULK", "*Season": row["Season"]
                 })
-            
             st.session_state.preview_df = pd.DataFrame(preview_rows)
-            st.success(":material/check_circle: Analysis Complete! Preview the structured data in the 'Data Processing & Export' tab or save it to the Database below.")
-
+            st.success("Extraction Complete! Go to Tab 2 to Export.")
             st.markdown("---")
-            st.subheader(":material/save: Save Data to Database")
-            if len(uploaded_pdfs) == 1:
-                first_po = master_details_df.iloc[0]['PO Number']
-                default_report_name = f"{first_po}_Report"
-            else:
-                default_report_name = f"Batch_PO_Report_{len(uploaded_pdfs)}_Files"
-            
-            st.session_state.report_name_default = default_report_name
-            report_name = st.text_input("Data Batch ID:", value=st.session_state.report_name_default)
-            
-            if st.button(":material/database: Initialize Data Injection"):
+            st.subheader("Database Injection")
+            report_name = st.text_input("Batch ID:", value=st.session_state.report_name_default)
+            if st.button("Inject Data"):
                 db_df = st.session_state.preview_df.copy()
                 db_df.insert(0, "Uploaded_Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 db_df.insert(0, "Report_Name", report_name)
-                
                 try:
                     conn = sqlite3.connect('po_database.db')
                     db_df.to_sql('uploaded_reports', conn, if_exists='append', index=False)
                     conn.close()
-                    st.success(f":material/check_circle: Successfully saved {len(db_df)} records into the Database!")
-                except Exception as e:
-                    st.error(f":material/error: Database Error: {e}")
+                    st.success("Successfully injected records!")
+                except Exception as e: st.error(f"Error: {e}")
 
+# =====================================================================
+# 2. DATA PROCESSING & EXPORT
+# =====================================================================
 elif menu == ":material/settings: 2. Data Processing & Export":
-    st.title(":material/settings: Data Processing & Template Generation")
-    
-    if st.session_state.preview_df is not None and not st.session_state.preview_df.empty:
-        
-        # --- NEW FIX: SORTING FEATURE ---
-        st.markdown("### :material/sort: Sort Your Data Before Export")
+    st.title(":material/settings: Data Processing & Export")
+    if st.session_state.preview_df is not None:
+        st.markdown("### Sort Your Data")
         sort_c1, sort_c2 = st.columns(2)
-        sort_column = sort_c1.selectbox("Select Column to Sort By:", ["(No Sorting)"] + list(st.session_state.preview_df.columns))
-        sort_order = sort_c2.radio("Sort Order:", ["Ascending :material/arrow_upward:", "Descending :material/arrow_downward:"], horizontal=True)
-        
-        # Apply sorting if a column is selected and reset index for Excel generation
+        sort_column = sort_c1.selectbox("Column:", ["(No Sorting)"] + list(st.session_state.preview_df.columns))
+        sort_order = sort_c2.radio("Order:", ["Ascending", "Descending"], horizontal=True)
         export_df = st.session_state.preview_df.copy()
         if sort_column != "(No Sorting)":
-            is_ascending = (sort_order == "Ascending :material/arrow_upward:")
-            # reset_index(drop=True) ensures no blank rows are skipped in the Excel template
-            export_df = export_df.sort_values(by=sort_column, ascending=is_ascending).reset_index(drop=True)
-
-        st.markdown("Review the extracted data before generating the final output:")
+            export_df = export_df.sort_values(by=sort_column, ascending=(sort_order=="Ascending")).reset_index(drop=True)
         st.dataframe(export_df, use_container_width=True)
-        
-        st.markdown("---")
-        if not os.path.exists(TEMPLATE_PATH):
-            st.error(f":material/error: Error: Could not find `{TEMPLATE_PATH}`. Please ensure your template file is uploaded.")
+        if not os.path.exists(TEMPLATE_PATH): st.error("Template Missing!")
         else:
-            with st.spinner("Compiling formatted Excel file..."):
-                final_excel_file = populate_existing_template(TEMPLATE_PATH, export_df)
-                
-            if final_excel_file:
-                st.download_button(
-                    label=":material/file_download: Download Compiled Excel Matrix", 
-                    data=final_excel_file, 
-                    file_name=f"{st.session_state.report_name_default}.xlsx", 
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-    else:
-        st.info(":material/info: Awaiting input data. Please navigate to **:material/download: 1. Data Extraction** to initialize analysis.")
+            if st.button("Generate Excel"):
+                output = populate_existing_template(TEMPLATE_PATH, export_df)
+                st.download_button("Download Template Excel", output, f"{st.session_state.report_name_default}.xlsx")
+    else: st.info("No data extracted yet. Please use Tab 1 first.")
 
-elif menu == ":material/bar_chart: 3. Reports":
-    st.title(":material/bar_chart: Reports & Dashboard")
-    st.markdown("View extraction statistics and query the local database.")
-    
+# =====================================================================
+# 3. NONE TEMPLATE EXTRACTION
+# =====================================================================
+elif menu == ":material/note_add: 3. None Template Data Extraction":
+    st.title(":material/note_add: None Template Data Extraction")
+    uploaded_pdfs = st.file_uploader("Upload PO PDFs (None Template)", type=["pdf"], accept_multiple_files=True)
+    if uploaded_pdfs:
+        all_po_details, all_items_data = [], []
+        with st.spinner('Analyzing...'):
+            for file in uploaded_pdfs:
+                details, df_items = parse_purchase_order(file)
+                if details:
+                    all_po_details.append(details)
+                    if not df_items.empty: all_items_data.append(df_items)
+        if all_po_details:
+            master_details_df = pd.DataFrame(all_po_details)
+            master_items_df = pd.concat(all_items_data, ignore_index=True) if all_items_data else pd.DataFrame()
+            preview_rows = []
+            
+            # Use left merge to combine global file details with line-item specific tracking
+            df_merged_raw = pd.merge(master_items_df, master_details_df, on="PO Number", how="left")
+            for _, row in df_merged_raw.iterrows():
+                age_group_val = str(row["Age Group"]).capitalize() if pd.notna(row["Age Group"]) and str(row["Age Group"]).upper() != "NOT FOUND" else ""
+                
+                # Use the clean market data directly from the updated scanner
+                raw_market = str(row["Order"]).strip()
+                market_found = "Other" if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"] else raw_market
+                if market_found.upper() in ["OTHER", "OTHERS"]:
+                    market_found = "Other"
+                
+                preview_rows.append({
+                    "PO Number": row["PO Number"], "Item Code": row["Item Code"], "Style ID": row["Item ID"],
+                    "Style Name": row["Style Name"], "Article Code": row["Sub-Code"], "Product Group": row["Product Group"],
+                    "Country of Origin": "MADE IN CAMBODIA", "Brand": "Adidas", "Factory Line": format_factory_name(row["Factory Line"]),
+                    "Leather Logo": row["Leather Logo"], "Age Group": age_group_val, "Size Page": row["Remark Size"],
+                    "Garment Type": row["Garment Type"], "Gender": row["Gender"], "Product Division": row["Product Division"],
+                    "Sourcing Size": row["Size"], "Order Quantity": row["Qty"], "Order Market": market_found, "Order Type": "BULK", "Season": row["Season"]
+                })
+            st.session_state.none_preview_df = pd.DataFrame(preview_rows)
+            st.success("Raw Extraction Complete! Go to Tab 4 to process.")
+            if st.button("Save Raw Data"):
+                db_df = st.session_state.none_preview_df.copy()
+                db_df.insert(0, "Uploaded_Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                try:
+                    conn = sqlite3.connect('po_database.db')
+                    db_df.to_sql('uploaded_reports_none_template', conn, if_exists='append', index=False)
+                    conn.close()
+                    st.success("Saved to Raw DB!")
+                except Exception as e: st.error(f"Error: {e}")
+
+# =====================================================================
+# 4. NONE TEMPLATE PROCESS
+# =====================================================================
+elif menu == ":material/build: 4. None Template Data Process":
+    st.title(":material/build: None Template Data Process")
+    if st.session_state.none_preview_df is not None:
+        export_df = st.session_state.none_preview_df.copy()
+        st.dataframe(export_df, use_container_width=True)
+        if st.button("Export Styled Excel"):
+            styled_excel = generate_styled_none_template(export_df)
+            st.download_button("Download Styled Order Form", styled_excel, f"{st.session_state.none_report_name_default}.xlsx")
+    else: st.info("No raw data extracted yet. Please use Tab 3 first.")
+
+# =====================================================================
+# 5. REPORTS
+# =====================================================================
+elif menu == ":material/bar_chart: 5. Reports":
+    st.title(":material/bar_chart: Reports")
     if os.path.exists('po_database.db'):
-        try:
-            conn = sqlite3.connect('po_database.db')
-            history_df = pd.read_sql("SELECT * FROM uploaded_reports ORDER BY Uploaded_Date DESC", conn)
-            conn.close()
-
-            # Convert string dates to actual datetime objects for analysis
-            history_df['Uploaded_Date_DT'] = pd.to_datetime(history_df['Uploaded_Date'])
-
-            # --- DASHBOARD METRICS ---
-            today = datetime.now().date()
-            start_of_month = today.replace(day=1)
-
-            # Isolate DataFrames by time periods
-            df_today = history_df[history_df['Uploaded_Date_DT'].dt.date == today]
-            df_month = history_df[(history_df['Uploaded_Date_DT'].dt.date >= start_of_month) & (history_df['Uploaded_Date_DT'].dt.date <= today)]
-
-            # Calculate Unique POs (Files)
-            today_po_count = df_today['*PO# number'].nunique()
-            month_po_count = df_month['*PO# number'].nunique()
-            total_po_count = history_df['*PO# number'].nunique()
-
-            # Calculate Total Records (Line Items)
-            today_count = len(df_today)
-            month_count = len(df_month)
-            total_count = len(history_df)
-
-            st.markdown("### :material/monitoring: Extraction Dashboard")
-            
-            st.markdown("**::material/folder: Unique PO Files Processed**")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("POs Today", today_po_count)
-            m2.metric("POs This Month", month_po_count)
-            m3.metric("Total POs in Database", total_po_count)
-            
-            st.markdown("**:material/list_alt: Line Items Extracted**")
-            m4, m5, m6 = st.columns(3)
-            m4.metric("Records Today", today_count)
-            m5.metric("Records This Month", month_count)
-            m6.metric("Total Records in Database", total_count)
-
-            st.markdown("---")
-            
-            # --- FILTERS ---
-            st.markdown("### :material/tune: Query Parameters")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            po_filter = col1.text_input("Filter by PO Number")
-            style_filter = col2.text_input("Filter by Style Name")
-            
-            market_options = history_df["*Order Market "].dropna().unique().tolist()
-            market_filter = col3.multiselect("Filter by Market", options=market_options)
-
-            # Date Range Filter (Default to Current Month)
-            date_range = col4.date_input("Filter by Date Range", value=(start_of_month, today))
-            
-            filtered_df = history_df.copy()
-
-            if po_filter:
-                filtered_df = filtered_df[filtered_df["*PO# number"].str.contains(po_filter, case=False, na=False)]
-            if style_filter:
-                filtered_df = filtered_df[filtered_df["*Style name"].str.contains(style_filter, case=False, na=False)]
-            if market_filter:
-                filtered_df = filtered_df[filtered_df["*Order Market "].isin(market_filter)]
-
-            # Apply Date Filter based on user selection
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                start_d, end_d = date_range
-                filtered_df = filtered_df[(filtered_df['Uploaded_Date_DT'].dt.date >= start_d) & (filtered_df['Uploaded_Date_DT'].dt.date <= end_d)]
-            elif isinstance(date_range, tuple) and len(date_range) == 1:
-                start_d = date_range[0]
-                filtered_df = filtered_df[filtered_df['Uploaded_Date_DT'].dt.date == start_d]
-            elif isinstance(date_range, date): 
-                filtered_df = filtered_df[filtered_df['Uploaded_Date_DT'].dt.date == date_range]
-
-            # Clean up the temporary datetime column before displaying
-            if 'Uploaded_Date_DT' in filtered_df.columns:
-                filtered_df = filtered_df.drop(columns=['Uploaded_Date_DT'])
-                
-            st.markdown(f"**Showing {len(filtered_df)} records (from {filtered_df['*PO# number'].nunique()} unique POs)**")
-            st.dataframe(filtered_df, use_container_width=True)
-            
-        except Exception as e:
-            st.error(f":material/error: Error reading database: {e}")
-    else:
-        st.info(":material/info: The database is empty. Upload and process some POs to begin storing data.")
+        conn = sqlite3.connect('po_database.db')
+        history_df = pd.read_sql("SELECT * FROM uploaded_reports ORDER BY Uploaded_Date DESC", conn)
+        conn.close()
+        st.dataframe(history_df, use_container_width=True)
+    else: st.info("Database is empty.")
