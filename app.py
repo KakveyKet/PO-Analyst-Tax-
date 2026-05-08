@@ -8,64 +8,16 @@ import openpyxl
 import sqlite3
 from copy import copy
 from datetime import datetime, date
+from openpyxl.styles import Font
 
-from openpyxl.cell.text import InlineFont
-from openpyxl.cell.rich_text import TextBlock, CellRichText
-from openpyxl.styles.colors import Color
-from openpyxl.styles import Font, Border, Side, PatternFill, Alignment
-
-# --- THE DEFAULT TEMPLATE PATH ---
-TEMPLATE_PATH = "POTemplate.xlsx"
-
-# --- DEFINING THE BORDER FOR AUTO-FILLED DATA ---
-thin_border = Border(
-    left=Side(style='thin', color='A5A5A5'), 
-    right=Side(style='thin', color='A5A5A5'), 
-    top=Side(style='thin', color='A5A5A5'), 
-    bottom=Side(style='thin', color='A5A5A5')
+# Import settings and functions from the styles.py file
+from styles import (
+    TEMPLATE_PATH, MARKET_MAPPING, THIN_BORDER, THICK_BORDER, 
+    GREEN_DATA_FONT, FONT_HEADER_DEFAULT, FONT_HEADER_RED, 
+    HEADER_ALIGNMENT, DATA_ALIGNMENT, HEADER_FILL_NEUTRAL, 
+    NONE_TEMPLATE_HEADER_CONFIG, format_factory_name, format_ak_column,
+    clean_none_template_val
 )
-
-# Darker border for the None Template headers
-thick_border = Border(
-    left=Side(style='thin', color='000000'), 
-    right=Side(style='thin', color='000000'), 
-    top=Side(style='thin', color='000000'), 
-    bottom=Side(style='thin', color='000000')
-)
-
-# --- FACTORY NAME FORMATTER ---
-def format_factory_name(name):
-    if not name: return name
-    name = str(name)
-    name = re.sub(r'([a-zA-Z])\(', r'\1 (', name)
-    name = re.sub(r'\)([a-zA-Z])', r') \1', name)
-    name = re.sub(r'(Trax)(Apparel)', r'\1 \2', name, flags=re.IGNORECASE)
-    return name.strip()
-
-# --- RICH TEXT FORMATTER FOR COLUMN AK ---
-def format_ak_column(text_val):
-    if not text_val: return text_val
-    text_str = str(text_val)
-    blue_color = Color(rgb="FF0070C0")
-    red_color = Color(rgb="FFFF0000")
-    blue_font = InlineFont(rFont="Calibri", sz=11, color=blue_color)
-    red_font = InlineFont(rFont="Calibri", sz=11, color=red_color)
-
-    if "between 50% to 74.9%" in text_str or "between 0% to 49.9%" in text_str:
-        parts = re.split(r'(Goose down|Duck down)', text_str)
-        rich_text_elements = []
-        for part in parts:
-            if not part: continue
-            if part in ["Goose down", "Duck down"]:
-                rich_text_elements.append(TextBlock(red_font, part))
-            else:
-                rich_text_elements.append(TextBlock(blue_font, part))
-        return CellRichText(*rich_text_elements)
-
-    if "Filling:" in text_str:
-        return CellRichText(TextBlock(blue_font, text_str))
-
-    return text_str
 
 # --- 1. THE EXTRACTION LOGIC ---
 def parse_purchase_order(file_object):
@@ -77,20 +29,6 @@ def parse_purchase_order(file_object):
         "Leather Logo": "No", "COO": "MADE IN CAMBODIA", "Season": "Not Found"
     }
     items_data = []
-
-    # --- SMART MARKET EXPANSION DICTIONARY ---
-    market_mapping = {
-        "INDO": "INDONESIA",
-        "KOR": "KOREA",
-        "JAP": "JAPAN",
-        "JPN": "JAPAN",
-        "CHI": "CHINA",
-        "CHN": "CHINA",
-        "TAI": "TAIWAN",
-        "TWN": "TAIWAN",
-        "OTHER": "Other",
-        "OTHERS": "Other"
-    }
 
     try:
         with pdfplumber.open(file_object) as pdf:
@@ -149,7 +87,7 @@ def parse_purchase_order(file_object):
                 for match in market_matches:
                     clean_match = match.strip().upper()
                     if clean_match not in skip_words:
-                        global_fallback_market = market_mapping.get(clean_match, clean_match)
+                        global_fallback_market = MARKET_MAPPING.get(clean_match, clean_match)
                         break
 
             global_fallback_item_code = "Not Found"
@@ -169,7 +107,7 @@ def parse_purchase_order(file_object):
                 if market_match:
                     clean_match = market_match.group(1).strip().upper()
                     if clean_match not in skip_words:
-                        current_market = market_mapping.get(clean_match, clean_match)
+                        current_market = MARKET_MAPPING.get(clean_match, clean_match)
 
                 # 2. Look for item strings (e.g. 62759440-INDO-S2662...)
                 item_match = re.search(r"Item\s*[:;]?\s*(\d{8}(?:-[A-Za-z0-9]+)*)", line, re.IGNORECASE)
@@ -180,13 +118,13 @@ def parse_purchase_order(file_object):
                     if len(parts) >= 3:
                         mid_market = parts[1].strip().upper()
                         if mid_market not in skip_words:
-                            current_market = market_mapping.get(mid_market, mid_market)
+                            current_market = MARKET_MAPPING.get(mid_market, mid_market)
                         current_item_id = "-".join(parts[2:]).strip()
                     elif len(parts) == 2:
                         val = parts[1].upper()
                         # Verify if the 2nd part is a market code or a style code
-                        if val in market_mapping or val in ["OTHER", "OTHERS", "INDONESIA", "KOREA", "CHINA", "JAPAN"]:
-                            current_market = market_mapping.get(val, val)
+                        if val in MARKET_MAPPING or val in ["OTHER", "OTHERS", "INDONESIA", "KOREA", "CHINA", "JAPAN"]:
+                            current_market = MARKET_MAPPING.get(val, val)
                         else:
                             current_item_id = parts[1].strip()
 
@@ -267,7 +205,7 @@ def populate_existing_template(template_path, df_merged):
             if col_num in mapping:
                 target_cell.value = mapping[col_num]
             
-            target_cell.border = thin_border
+            target_cell.border = THIN_BORDER
             if col_num == 22: 
                 target_cell.number_format = '0.00'
             if col_num == 37 and target_cell.value:
@@ -285,59 +223,25 @@ def generate_styled_none_template(df):
     sheet = workbook.active
     sheet.title = "Order Form"
     
-    header_config = [
-        (1, 1, "PO"),
-        (2, 6, "customer ordered size"),
-        (7, 11, "Sourcing Size"),
-        (12, 16, "Tecn. Notation"),
-        (17, 20, "size run ID"),
-        (21, 24, "Chinese Customize Size - 2nd line size"),
-        (25, 28, "Quantity"),
-        (29, 33, "Age group"),
-        (34, 38, "Gender"),
-        (39, 43, "Size Spec / Pattern"),
-        (44, 47, "Size page"),
-        (48, 51, "Top/Bottom"),
-        (52, 54, "Product division"),
-        (55, 57, "Season"),
-        (58, 60, "Style"),
-        (61, 63, "Code item")
-    ]
-    
-    header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
-    font_header_default = Font(bold=True, color="000000")
-    font_header_red = Font(bold=True, color="FF0000")
-    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    
-    for start_c, end_c, text in header_config:
+    for start_c, end_c, text in NONE_TEMPLATE_HEADER_CONFIG:
         sheet.merge_cells(start_row=1, start_column=start_c, end_row=1, end_column=end_c)
         main_cell = sheet.cell(row=1, column=start_c)
         main_cell.value = text
-        current_font = font_header_red if text == "Chinese Customize Size - 2nd line size" else font_header_default
+        current_font = FONT_HEADER_RED if text == "Chinese Customize Size - 2nd line size" else FONT_HEADER_DEFAULT
         for c in range(start_c, end_c + 1):
             cell = sheet.cell(row=1, column=c)
-            cell.fill = header_fill
+            cell.fill = HEADER_FILL_NEUTRAL
             cell.font = current_font
-            cell.alignment = header_alignment
-            cell.border = thick_border
+            cell.alignment = HEADER_ALIGNMENT
+            cell.border = THICK_BORDER
                 
-    green_data_font = Font(color="008608")
-    data_alignment = Alignment(horizontal='center', vertical='center')
-    
-    def clean_val(val):
-        if not val: return ""
-        v_str = str(val).strip()
-        if v_str.upper() in ["NOT FOUND", "NAN", "NONE"]:
-            return ""
-        return v_str
-    
     for r_idx, row in enumerate(df.to_dict('records'), 2):
-        for start_c, end_c, text_h in header_config:
+        for start_c, end_c, text_h in NONE_TEMPLATE_HEADER_CONFIG:
             if start_c != end_c:
                 sheet.merge_cells(start_row=r_idx, start_column=start_c, end_row=r_idx, end_column=end_c)
             target_cell = sheet.cell(row=r_idx, column=start_c)
             if text_h == "PO":
-                target_cell.value = clean_val(row.get("PO Number", ""))
+                target_cell.value = clean_none_template_val(row.get("PO Number", ""))
             elif text_h == "customer ordered size":
                 full_size = str(row.get("Sourcing Size", ""))
                 size_parts = full_size.split('/')
@@ -356,30 +260,30 @@ def generate_styled_none_template(df):
                 target_cell.value = float(row.get("Order Quantity", 0))
                 target_cell.number_format = '0.00'
             elif text_h == "Age group":
-                target_cell.value = clean_val(row.get("Age Group", ""))
+                target_cell.value = clean_none_template_val(row.get("Age Group", ""))
             elif text_h == "Gender":
-                target_cell.value = clean_val(row.get("Gender", ""))
+                target_cell.value = clean_none_template_val(row.get("Gender", ""))
             elif text_h == "Size Spec / Pattern":
                 target_cell.value = "GLOBAL SIZE"
             elif text_h == "Size page":
-                target_cell.value = clean_val(row.get("Size Page", ""))
+                target_cell.value = clean_none_template_val(row.get("Size Page", ""))
             elif text_h == "Top/Bottom":
-                target_cell.value = clean_val(row.get("Garment Type", "")).title()
+                target_cell.value = clean_none_template_val(row.get("Garment Type", "")).title()
             elif text_h == "Product division":
-                target_cell.value = clean_val(row.get("Product Division", ""))
+                target_cell.value = clean_none_template_val(row.get("Product Division", ""))
             elif text_h == "Season":
-                target_cell.value = clean_val(row.get("Season", ""))
+                target_cell.value = clean_none_template_val(row.get("Season", ""))
             elif text_h == "Style":
-                style_val = clean_val(row.get("Style ID", ""))
-                if not style_val: style_val = clean_val(row.get("Style Name", ""))
+                style_val = clean_none_template_val(row.get("Style ID", ""))
+                if not style_val: style_val = clean_none_template_val(row.get("Style Name", ""))
                 target_cell.value = style_val
             elif text_h == "Code item":
-                target_cell.value = clean_val(row.get("Item Code", ""))
+                target_cell.value = clean_none_template_val(row.get("Item Code", ""))
             for c in range(start_c, end_c + 1):
                 cell = sheet.cell(row=r_idx, column=c)
-                cell.font = green_data_font
-                cell.border = thin_border
-                cell.alignment = data_alignment
+                cell.font = GREEN_DATA_FONT
+                cell.border = THIN_BORDER
+                cell.alignment = DATA_ALIGNMENT
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)

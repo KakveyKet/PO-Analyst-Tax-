@@ -8,6 +8,7 @@ import pdfplumber
 import pandas
 import openpyxl
 import sqlite3
+import styles # import your extracted logic!
 import streamlit.runtime.scriptrunner.magic_funcs  # <-- FIXES THE MISSING MODULE ERROR
 
 def resolve_path(path):
