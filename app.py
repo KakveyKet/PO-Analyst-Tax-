@@ -152,7 +152,10 @@ def parse_purchase_order(file_object):
                 for match in market_matches:
                     clean_match = match.strip().upper()
                     if clean_match not in skip_words:
-                        global_fallback_market = MARKET_MAPPING.get(clean_match, clean_match)
+                        if clean_match in ["OTHER", "OTHERS"]:
+                            global_fallback_market = "Other"
+                        else:
+                            global_fallback_market = MARKET_MAPPING.get(clean_match, clean_match)
                         break
 
             global_fallback_item_code = "Not Found"
@@ -172,7 +175,10 @@ def parse_purchase_order(file_object):
                 if market_match:
                     clean_match = market_match.group(1).strip().upper()
                     if clean_match not in skip_words:
-                        current_market = MARKET_MAPPING.get(clean_match, clean_match)
+                        if clean_match in ["OTHER", "OTHERS"]:
+                            current_market = "Other"
+                        else:
+                            current_market = MARKET_MAPPING.get(clean_match, clean_match)
 
                 # 2. Look for item strings (e.g. 62759440-INDO-S2662...)
                 item_match = re.search(r"Item\s*[:;]?\s*(\d{8}(?:-[A-Za-z0-9]+)*)", line, re.IGNORECASE)
@@ -183,12 +189,18 @@ def parse_purchase_order(file_object):
                     if len(parts) >= 3:
                         mid_market = parts[1].strip().upper()
                         if mid_market not in skip_words:
-                            current_market = MARKET_MAPPING.get(mid_market, mid_market)
+                            if mid_market in ["OTHER", "OTHERS"]:
+                                current_market = "Other"
+                            else:
+                                current_market = MARKET_MAPPING.get(mid_market, mid_market)
                         current_item_id = "-".join(parts[2:]).strip()
                     elif len(parts) == 2:
                         val = parts[1].upper()
                         if val in MARKET_MAPPING or val in ["OTHER", "OTHERS", "INDONESIA", "KOREA", "CHINA", "JAPAN"]:
-                            current_market = MARKET_MAPPING.get(val, val)
+                            if val in ["OTHER", "OTHERS"]:
+                                current_market = "Other"
+                            else:
+                                current_market = MARKET_MAPPING.get(val, val)
                         else:
                             current_item_id = parts[1].strip()
 
@@ -260,7 +272,12 @@ if menu == ":material/download: 1. Data Extraction":
                 age_group_val = str(row["Age Group"]).capitalize() if pd.notna(row["Age Group"]) and str(row["Age Group"]).upper() != "NOT FOUND" else ""
                 
                 raw_market = str(row["Order"]).strip()
-                market_found = "Other" if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"] else raw_market
+                if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"]:
+                    market_found = "Other"
+                elif raw_market.upper() in ["OTHER", "OTHERS"]:
+                    market_found = "Other"
+                else:
+                    market_found = raw_market
                 
                 preview_rows.append({
                     "*PO# number": row["PO Number"], "Item Code": row["Item Code"], "*Style#": row["Item ID"],
@@ -332,7 +349,12 @@ elif menu == ":material/note_add: 3. None Template Data Extraction":
                 age_group_val = str(row["Age Group"]).capitalize() if pd.notna(row["Age Group"]) and str(row["Age Group"]).upper() != "NOT FOUND" else ""
                 
                 raw_market = str(row["Order"]).strip()
-                market_found = "Other" if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"] else raw_market
+                if not raw_market or raw_market.upper() in ["NOT FOUND", "", "ORDER"]:
+                    market_found = "Other"
+                elif raw_market.upper() in ["OTHER", "OTHERS"]:
+                    market_found = "Other"
+                else:
+                    market_found = raw_market
                 
                 preview_rows.append({
                     "PO Number": row["PO Number"], "Item Code": row["Item Code"], "Style ID": row["Item ID"],
