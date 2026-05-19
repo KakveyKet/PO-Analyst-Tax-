@@ -91,7 +91,9 @@ def parse_purchase_order(file_object):
         "Style Name": "Not Found", "Age Group": "Not Found", "Gender": "Not Found", 
         "Garment Type": "Not Found", "Product Group": "Apparel", 
         "Factory Line": "Trax Apparel (Cambodia) Co.,Ltd.", "Product Division": "APP", 
-        "Leather Logo": "No", "COO": "MADE IN CAMBODIA", "Season": "Not Found"
+        "Leather Logo": "No", "COO": "MADE IN CAMBODIA", "Season": "Not Found",
+        "Technical Notation": "B3",  # default
+        "Size Run ID": "2X"         # default
     }
     items_data = []
 
@@ -112,6 +114,17 @@ def parse_purchase_order(file_object):
             size_match = re.search(r"SIZE\s*PAGE\s*([^\n]+)", full_text, re.IGNORECASE)
             if size_match: 
                 po_details["Remark Size"] = size_match.group(1).strip()
+                
+            # --- NEW: EXTRACT TECHNICAL NOTATION & SIZE RUN ---
+            # e.g., "Technical Notation: T6;" or "Tecn. Notation: B3;"
+            tech_match = re.search(r"(?:Technical|Tecn\.?)\s*Notation\s*[:;]?\s*([A-Za-z0-9\-]+)", full_text, re.IGNORECASE)
+            if tech_match:
+                po_details["Technical Notation"] = tech_match.group(1).strip(" ;")
+
+            # e.g., "Size run: 12 (D;CH);" or "Size run: 2X;"
+            size_run_match = re.search(r"Size\s*run\s*[:;]?\s*([A-Za-z0-9\s]+(?:\([^)]+\))?)", full_text, re.IGNORECASE)
+            if size_run_match:
+                po_details["Size Run ID"] = size_run_match.group(1).strip(" ;")
 
             garment_patterns = {
                 "Style Name": r"Style\s*Name[\s:;]*(.*?)(?=;|Age|Gender|Garment|Product|COO)",
@@ -211,14 +224,19 @@ def parse_purchase_order(file_object):
                         if len(p) > 2 and (p[1] == "NO" or p[2] == "NO"): continue
                         pcs_idx = p.index("PCS")
                         try:
+                            # Fix for numbers with commas like "2,066.00"
+                            qty_str = p[pcs_idx - 1].replace(',', '')
+                            price_str = p[pcs_idx + 1].replace(',', '')
+                            amount_str = p[-2].replace(',', '')
+                            
                             items_data.append({
                                 "PO Number": po_details["PO Number"], 
                                 "Item Code": current_item_code,
                                 "Item ID": current_item_id,
                                 "Order": current_market,
                                 "Material": p[0], "Color": p[1], "Size": p[2], "Sub-Code": p[3],
-                                "Qty": float(p[pcs_idx - 1]), "Unit": "PCS",
-                                "Price": float(p[pcs_idx + 1]), "Amount": float(p[-2]), "Delivery": p[-1]
+                                "Qty": float(qty_str), "Unit": "PCS",
+                                "Price": float(price_str), "Amount": float(amount_str), "Delivery": p[-1]
                             })
                         except (ValueError, IndexError): continue
                             
@@ -286,7 +304,9 @@ if menu == ":material/download: 1. Data Extraction":
                     "Leather logo (optional)": row["Leather Logo"], "*Age group": age_group_val, "*Size page": row["Remark Size"],
                     "*Garment type": row["Garment Type"], "*Gender": row["Gender"], "*Product division ": row["Product Division"],
                     "*Sourcing size": row["Size"], "*Order Quantity": row["Qty"], "*Order Market ": market_found,
-                    "*Order Type": "BULK", "*Season": row["Season"]
+                    "*Order Type": "BULK", "*Season": row["Season"],
+                    "Technical Notation": row.get("Technical Notation", "B3"),
+                    "Size Run ID": row.get("Size Run ID", "2X")
                 })
             st.session_state.preview_df = pd.DataFrame(preview_rows)
             st.success("Extraction Complete! Go to Tab 2 to Export.")
@@ -362,7 +382,9 @@ elif menu == ":material/note_add: 3. None Template Data Extraction":
                     "Country of Origin": "MADE IN CAMBODIA", "Brand": "Adidas", "Factory Line": format_factory_name(row["Factory Line"]),
                     "Leather Logo": row["Leather Logo"], "Age Group": age_group_val, "Size Page": row["Remark Size"],
                     "Garment Type": row["Garment Type"], "Gender": row["Gender"], "Product Division": row["Product Division"],
-                    "Sourcing Size": row["Size"], "Order Quantity": row["Qty"], "Order Market": market_found, "Order Type": "BULK", "Season": row["Season"]
+                    "Sourcing Size": row["Size"], "Order Quantity": row["Qty"], "Order Market": market_found, "Order Type": "BULK", "Season": row["Season"],
+                    "Technical Notation": row.get("Technical Notation", "B3"),
+                    "Size Run ID": row.get("Size Run ID", "2X")
                 })
             st.session_state.none_preview_df = pd.DataFrame(preview_rows)
             st.success("Raw Extraction Complete! Go to Tab 4 to process.")
