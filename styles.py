@@ -206,17 +206,17 @@ def generate_styled_none_template(df):
             elif text_h == "customer ordered size":
                 full_size = str(row.get("Sourcing Size", ""))
                 size_parts = full_size.split('/')
-                # First part goes to customer ordered size (e.g. 2XL)
                 target_cell.value = size_parts[0] if len(size_parts) > 1 else full_size
             elif text_h == "Sourcing Size":
                 full_size = str(row.get("Sourcing Size", ""))
                 size_parts = full_size.split('/')
-                # Second part goes to Sourcing Size (e.g. 62)
                 target_cell.value = size_parts[1] if len(size_parts) > 1 else full_size
             elif text_h == "Tecn. Notation":
-                target_cell.value = "B3"
+                # --- NOW FULLY DYNAMIC ---
+                target_cell.value = clean_none_template_val(row.get("Technical Notation", "B3"))
             elif text_h == "size run ID":
-                target_cell.value = "2X"
+                # --- NOW FULLY DYNAMIC ---
+                target_cell.value = clean_none_template_val(row.get("Size Run ID", "2X"))
             elif text_h == "Chinese Customize Size - 2nd line size":
                 target_cell.value = "NO"
             elif text_h == "Quantity":
