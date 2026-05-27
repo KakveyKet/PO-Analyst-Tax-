@@ -23,7 +23,7 @@ hide_streamlit_style = """
     /* --- WHITE LABELING: HIDE STREAMLIT ELEMENTS --- */
     #MainMenu {visibility: hidden;} /* Hides the hamburger menu */
     footer {visibility: hidden;} /* Hides the "Made with Streamlit" footer */
-    header {visibility: hidden;} /* Hides the top header bar */
+    # header {visibility: hidden;} /* Hides the top header bar */
     .stDeployButton {display:none;} /* Removes the 'Deploy' button */
     
     /* 1. Hides the radio circles entirely */
@@ -422,3 +422,4 @@ elif menu == ":material/bar_chart: 5. Reports":
         conn.close()
         st.dataframe(history_df, use_container_width=True)
     else: st.info("Database is empty.")
+    
